@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# Build outputs
+frontend/dist/
+backend/public/
+!backend/public/.gitkeep
+
+# Environment files
+.env
+backend/.env
+frontend/.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Data files (except structure)
+backend/data/*.json
+backend/data/backups/
+!backend/data/.gitkeep
+!backend/data/backups/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+coverage/

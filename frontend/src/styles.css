@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* App polish */
+:root { color-scheme: dark; }
+* { -webkit-tap-highlight-color: transparent; }
