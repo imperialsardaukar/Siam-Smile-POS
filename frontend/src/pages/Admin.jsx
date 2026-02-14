@@ -6,6 +6,7 @@ import Input from "../components/Input.jsx";
 import Select from "../components/Select.jsx";
 import Badge from "../components/Badge.jsx";
 import Modal from "../components/Modal.jsx";
+import { printReceipt } from "../components/Receipt.jsx";
 import { useStore } from "../state/StoreContext.jsx";
 import { fmtAED } from "../lib/money.js";
 import { calcSubtotal, orderPrepSeconds } from "../lib/calc.js";
@@ -50,7 +51,7 @@ export default function Admin() {
         </div>
 
         {tab === "dashboard" && <DashboardPanel settings={settings} snapshot={snapshot} emit={emit} />}
-        {tab === "orders" && <OrdersPanel orders={orders} emit={emit} />}
+        {tab === "orders" && <OrdersPanel orders={orders} emit={emit} settings={settings} />}
         {tab === "menu" && <MenuPanel menu={menu} categories={categories} emit={emit} />}
         {tab === "inventory" && <InventoryPanel snapshot={snapshot} emit={emit} />}
         {tab === "staff" && <StaffPanel staff={staff} emit={emit} />}
@@ -121,10 +122,13 @@ function Stat({ label, value }) {
   );
 }
 
-function OrdersPanel({ orders, emit }) {
+function OrdersPanel({ orders, emit, settings }) {
   const [editOrder, setEditOrder] = useState(null);
   const [editNote, setEditNote] = useState("");
   const [filter, setFilter] = useState("all");
+  const [receiptOrder, setReceiptOrder] = useState(null);
+  const [receiptData, setReceiptData] = useState(null);
+  const [receiptPreview, setReceiptPreview] = useState("");
 
   function openEdit(o) {
     setEditOrder(o);
@@ -142,6 +146,27 @@ function OrdersPanel({ orders, emit }) {
     setEditOrder(null);
   }
 
+  async function viewReceipt(order) {
+    const resp = await emit("receipt:preview", { orderId: order.id });
+    if (resp.ok) {
+      setReceiptOrder(resp.order);
+      setReceiptData(resp.receipt);
+      setReceiptPreview(resp.preview);
+    }
+  }
+
+  function closeReceipt() {
+    setReceiptOrder(null);
+    setReceiptData(null);
+    setReceiptPreview("");
+  }
+
+  function handlePrintReceipt() {
+    if (receiptOrder) {
+      printReceipt(receiptOrder, receiptData, settings);
+    }
+  }
+
   const filteredOrders = orders.filter(o => {
     if (filter === "all") return true;
     return o.status === filter;
@@ -151,7 +176,7 @@ function OrdersPanel({ orders, emit }) {
     <Card>
       <CardHeader 
         title="Orders" 
-        subtitle="Manage all orders"
+        subtitle="Manage all orders and view receipts"
         right={
           <Select value={filter} onChange={(e) => setFilter(e.target.value)} className="w-32">
             <option value="all">All</option>
@@ -177,8 +202,16 @@ function OrdersPanel({ orders, emit }) {
                     {o.createdByUsername} • {fmtAED(o.total || calcSubtotal(o.items || []))}
                     {o.promo && <span className="text-emerald-400 ml-2">Promo: {o.promo.code}</span>}
                   </div>
+                  {(o.customerName || o.tableNumber) && (
+                    <div className="text-xs text-neutral-400 mt-1">
+                      {o.customerName && `Customer: ${o.customerName}`}
+                      {o.customerName && o.tableNumber && " • "}
+                      {o.tableNumber && `Table: ${o.tableNumber}`}
+                    </div>
+                  )}
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
+                  <Button variant="subtle" onClick={() => viewReceipt(o)}>View Receipt</Button>
                   {o.status !== "done" && (
                     <Button variant="subtle" onClick={() => openEdit(o)}>Edit</Button>
                   )}
@@ -219,6 +252,92 @@ function OrdersPanel({ orders, emit }) {
           </div>
         </Modal>
       )}
+
+      {/* Receipt Modal */}
+      <Modal
+        open={!!receiptOrder}
+        title={`Receipt - Order #${receiptOrder?.id?.slice(0, 8)?.toUpperCase()}`}
+        onClose={closeReceipt}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={closeReceipt}>Close</Button>
+            <Button onClick={handlePrintReceipt}>Print Receipt</Button>
+          </div>
+        }
+      >
+        {receiptOrder && (
+          <div className="space-y-4">
+            {/* Print-friendly receipt */}
+            <div className="print-only">
+              <pre className="whitespace-pre-wrap font-mono text-sm">
+                {receiptPreview}
+              </pre>
+            </div>
+            
+            {/* On-screen receipt view */}
+            <div className="no-print">
+              <div className="text-center mb-4">
+                <div className="text-2xl font-bold text-emerald-400">{fmtAED(receiptOrder.total)}</div>
+                <div className="text-sm text-neutral-400">
+                  {new Date(receiptOrder.createdAt).toLocaleString()}
+                </div>
+                {receiptData && (
+                  <div className="text-sm text-neutral-400">
+                    Payment: {receiptData.paymentMethod?.toUpperCase()}
+                  </div>
+                )}
+              </div>
+              
+              <div className="border-t border-neutral-800 pt-3 mb-3">
+                <div className="text-sm font-medium text-neutral-300 mb-2">Items</div>
+                <div className="space-y-1">
+                  {receiptOrder.items?.map((item, idx) => (
+                    <div key={idx} className="flex justify-between text-sm">
+                      <span className="text-neutral-300">{item.qty} × {item.name}</span>
+                      <span className="text-neutral-200">{fmtAED(item.price * item.qty)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              
+              <div className="border-t border-neutral-800 pt-3 space-y-1 text-sm">
+                <div className="flex justify-between text-neutral-400">
+                  <span>Subtotal</span>
+                  <span>{fmtAED(receiptOrder.subtotal)}</span>
+                </div>
+                {receiptOrder.discount > 0 && (
+                  <div className="flex justify-between text-emerald-400">
+                    <span>Discount {receiptOrder.promo?.code && `(${receiptOrder.promo.code})`}</span>
+                    <span>-{fmtAED(receiptOrder.discount)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between font-semibold text-lg pt-2 border-t border-neutral-800">
+                  <span>TOTAL</span>
+                  <span className="text-emerald-400">{fmtAED(receiptOrder.total)}</span>
+                </div>
+              </div>
+              
+              {(receiptOrder.customerName || receiptOrder.tableNumber) && (
+                <div className="border-t border-neutral-800 pt-3 mt-3">
+                  <div className="text-sm font-medium text-neutral-300 mb-2">Customer Info</div>
+                  {receiptOrder.customerName && (
+                    <div className="text-sm text-neutral-400">{receiptOrder.customerName}</div>
+                  )}
+                  {receiptOrder.tableNumber && (
+                    <div className="text-sm text-neutral-400">Table {receiptOrder.tableNumber}</div>
+                  )}
+                </div>
+              )}
+              
+              <div className="border-t border-neutral-800 pt-3 mt-3">
+                <div className="text-sm text-neutral-400">
+                  Cashier: {receiptOrder.createdByUsername || "Staff"}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
     </Card>
   );
 }
@@ -227,6 +346,12 @@ function MenuPanel({ menu, categories, emit }) {
   const [itemModal, setItemModal] = useState(false);
   const [catModal, setCatModal] = useState(false);
   const [editItem, setEditItem] = useState(null);
+  const [backupModal, setBackupModal] = useState(false);
+  const [importModal, setImportModal] = useState(false);
+  const [importData, setImportData] = useState("");
+  const [importMode, setImportMode] = useState("merge");
+  const [importError, setImportError] = useState("");
+  const [importSuccess, setImportSuccess] = useState("");
 
   const [name, setName] = useState("");
   const [price, setPrice] = useState("0");
@@ -269,6 +394,10 @@ function MenuPanel({ menu, categories, emit }) {
     await emit("menu:delete", { id });
   }
 
+  async function toggleAvailability(id, currentUnavailable) {
+    await emit("menu:setAvailability", { id, unavailable: !currentUnavailable });
+  }
+
   const [catName, setCatName] = useState("");
   const [editCat, setEditCat] = useState(null);
 
@@ -299,57 +428,228 @@ function MenuPanel({ menu, categories, emit }) {
     await emit("category:delete", { id });
   }
 
+  async function exportBackup() {
+    const resp = await emit("menu:export", {});
+    if (resp.ok) {
+      const blob = new Blob([JSON.stringify(resp.data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `siam-smile-menu-backup-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setBackupModal(false);
+    }
+  }
+
+  async function importBackup() {
+    setImportError("");
+    setImportSuccess("");
+    
+    try {
+      const data = JSON.parse(importData);
+      if (!data.menu || !Array.isArray(data.menu)) {
+        setImportError("Invalid backup file: menu array not found");
+        return;
+      }
+      
+      if (importMode === "replace") {
+        if (!confirm("WARNING: Replace mode will DELETE all existing menu items and categories. This cannot be undone. Continue?")) {
+          return;
+        }
+      }
+      
+      const resp = await emit("menu:import", { data, mode: importMode });
+      if (resp.ok) {
+        setImportSuccess(`Import successful! Imported ${resp.imported.categories} categories and ${resp.imported.items} items.`);
+        setImportData("");
+        setTimeout(() => {
+          setImportModal(false);
+          setImportSuccess("");
+        }, 2000);
+      } else {
+        setImportError(resp.error || "Import failed");
+      }
+    } catch (e) {
+      setImportError("Invalid JSON file: " + e.message);
+    }
+  }
+
+  function handleFileUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setImportData(event.target.result);
+    };
+    reader.readAsText(file);
+  }
+
   return (
-    <div className="grid lg:grid-cols-[1fr_360px] gap-6">
-      <Card>
-        <CardHeader
-          title="Menu Items"
-          subtitle="Create, edit, delete, and attach images."
-          right={<Button onClick={openCreateItem}>Add Item</Button>}
-        />
-        <CardBody className="space-y-3">
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {menu.map(it => (
-              <div key={it.id} className="rounded-2xl border border-neutral-800 bg-neutral-900/30 overflow-hidden">
-                <div className="aspect-[4/3] bg-neutral-950/50">
-                  {it.imageUrl ? <img src={it.imageUrl} alt={it.name} className="w-full h-full object-cover" /> : <div className="h-full grid place-items-center text-neutral-500 text-sm">No image</div>}
+    <div className="space-y-6">
+      <div className="grid lg:grid-cols-[1fr_360px] gap-6">
+        <Card>
+          <CardHeader
+            title="Menu Items"
+            subtitle="Create, edit, delete, and manage availability."
+            right={
+              <div className="flex gap-2">
+                <Button variant="subtle" onClick={() => setBackupModal(true)}>Backup</Button>
+                <Button variant="subtle" onClick={() => setImportModal(true)}>Import</Button>
+                <Button onClick={openCreateItem}>Add Item</Button>
+              </div>
+            }
+          />
+          <CardBody className="space-y-3">
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {menu.map(it => (
+                <div key={it.id} className={`rounded-2xl border border-neutral-800 bg-neutral-900/30 overflow-hidden ${it.unavailable ? 'opacity-60' : ''}`}>
+                  <div className="aspect-[4/3] bg-neutral-950/50 relative">
+                    {it.imageUrl ? <img src={it.imageUrl} alt={it.name} className="w-full h-full object-cover" /> : <div className="h-full grid place-items-center text-neutral-500 text-sm">No image</div>}
+                    {it.unavailable && (
+                      <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                        <Badge variant="red">UNAVAILABLE</Badge>
+                      </div>
+                    )}
+                  </div>
+                  <div className="p-4 space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="font-semibold">{it.name}</div>
+                      <div className="flex flex-col items-end gap-1">
+                        <Badge variant={it.isActive ? "green" : "red"}>{it.isActive ? "Active" : "Hidden"}</Badge>
+                      </div>
+                    </div>
+                    <div className="text-sm text-neutral-300">{fmtAED(it.price)}</div>
+                    <div className="flex gap-2 flex-wrap">
+                      <Button variant="subtle" onClick={() => openEditItem(it)} className="flex-1">Edit</Button>
+                      <Button 
+                        variant={it.unavailable ? "ghost" : "subtle"} 
+                        onClick={() => toggleAvailability(it.id, it.unavailable)}
+                        className="text-xs"
+                        title={it.unavailable ? "Mark as available" : "Mark as unavailable"}
+                      >
+                        {it.unavailable ? "Enable" : "Disable"}
+                      </Button>
+                      <Button variant="danger" onClick={() => deleteItem(it.id)} className="text-xs">Delete</Button>
+                    </div>
+                  </div>
                 </div>
-                <div className="p-4 space-y-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="font-semibold">{it.name}</div>
-                    <Badge variant={it.isActive ? "green" : "red"}>{it.isActive ? "Active" : "Hidden"}</Badge>
-                  </div>
-                  <div className="text-sm text-neutral-300">{fmtAED(it.price)}</div>
-                  <div className="flex gap-2">
-                    <Button variant="subtle" onClick={() => openEditItem(it)} className="w-full">Edit</Button>
-                    <Button variant="danger" onClick={() => deleteItem(it.id)} className="w-full">Delete</Button>
-                  </div>
+              ))}
+            </div>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader
+            title="Categories"
+            subtitle="Groups used in Cashier menu."
+            right={<Button variant="subtle" onClick={() => { setEditCat(null); setCatName(""); setCatModal(true); }}>Add</Button>}
+          />
+          <CardBody className="space-y-3">
+            {categories.map(c => (
+              <div key={c.id} className="rounded-2xl border border-neutral-800 bg-neutral-900/20 p-3 flex items-center justify-between gap-2">
+                <div className="font-medium">{c.name}</div>
+                <div className="flex items-center gap-2">
+                  <Badge variant="neutral">#{c.sortOrder}</Badge>
+                  <Button variant="subtle" onClick={() => editCategory(c)} className="text-xs">Edit</Button>
+                  <Button variant="danger" onClick={() => deleteCategory(c.id)} className="text-xs">Delete</Button>
                 </div>
               </div>
             ))}
-          </div>
-        </CardBody>
-      </Card>
+          </CardBody>
+        </Card>
+      </div>
 
-      <Card>
-        <CardHeader
-          title="Categories"
-          subtitle="Groups used in Cashier menu."
-          right={<Button variant="subtle" onClick={() => { setEditCat(null); setCatName(""); setCatModal(true); }}>Add</Button>}
-        />
-        <CardBody className="space-y-3">
-          {categories.map(c => (
-            <div key={c.id} className="rounded-2xl border border-neutral-800 bg-neutral-900/20 p-3 flex items-center justify-between gap-2">
-              <div className="font-medium">{c.name}</div>
-              <div className="flex items-center gap-2">
-                <Badge variant="neutral">#{c.sortOrder}</Badge>
-                <Button variant="subtle" onClick={() => editCategory(c)} className="text-xs">Edit</Button>
-                <Button variant="danger" onClick={() => deleteCategory(c.id)} className="text-xs">Delete</Button>
-              </div>
+      {/* Backup/Export Modal */}
+      <Modal
+        open={backupModal}
+        title="Export Menu Backup"
+        onClose={() => setBackupModal(false)}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setBackupModal(false)}>Cancel</Button>
+            <Button onClick={exportBackup}>Download Backup</Button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-neutral-300">
+          <p>This will download a JSON file containing all your categories and menu items.</p>
+          <div className="text-sm text-neutral-400">
+            <div>• All categories (ID, name, sort order)</div>
+            <div>• All menu items (ID, name, price, description, availability, etc.)</div>
+            <div>• Image URLs are included (images themselves are not downloaded)</div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Import Modal */}
+      <Modal
+        open={importModal}
+        title="Import Menu Backup"
+        onClose={() => { setImportModal(false); setImportData(""); setImportError(""); setImportSuccess(""); }}
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => { setImportModal(false); setImportData(""); setImportError(""); setImportSuccess(""); }}>Cancel</Button>
+            <Button onClick={importBackup} disabled={!importData.trim()}>Import</Button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <div className="text-sm text-neutral-300 mb-2">Import Mode</div>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input 
+                  type="radio" 
+                  value="merge" 
+                  checked={importMode === "merge"}
+                  onChange={(e) => setImportMode(e.target.value)}
+                  className="rounded border-neutral-600 bg-neutral-800"
+                />
+                <span className="text-sm text-neutral-300">
+                  <strong>Merge</strong> (Safe) - Add new items, update existing ones. Keeps current items.
+                </span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input 
+                  type="radio" 
+                  value="replace" 
+                  checked={importMode === "replace"}
+                  onChange={(e) => setImportMode(e.target.value)}
+                  className="rounded border-neutral-600 bg-neutral-800"
+                />
+                <span className="text-sm text-red-300">
+                  <strong>Replace</strong> (Dangerous) - Delete everything and restore from backup.
+                </span>
+              </label>
             </div>
-          ))}
-        </CardBody>
-      </Card>
+          </div>
+          
+          <div>
+            <div className="text-sm text-neutral-300 mb-2">Backup File</div>
+            <input
+              type="file"
+              accept=".json"
+              onChange={handleFileUpload}
+              className="w-full text-sm text-neutral-300 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-neutral-800 file:text-neutral-300 hover:file:bg-neutral-700"
+            />
+            <div className="text-xs text-neutral-500 mt-2">
+              Or paste the JSON content below:
+            </div>
+          </div>
+          
+          <textarea
+            value={importData}
+            onChange={(e) => setImportData(e.target.value)}
+            placeholder="Paste backup JSON here..."
+            className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm min-h-[120px] resize-y text-neutral-300 font-mono"
+          />
+          
+          {importError && <div className="text-sm text-red-400">{importError}</div>}
+          {importSuccess && <div className="text-sm text-emerald-400">{importSuccess}</div>}
+        </div>
+      </Modal>
 
       <Modal
         open={itemModal}

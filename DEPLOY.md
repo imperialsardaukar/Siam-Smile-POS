@@ -294,6 +294,53 @@ npm run build
 pm2 restart siam-smile-pos
 ```
 
+### Safe Update Deployment (Preserves All Data)
+
+**⚠️ IMPORTANT: This update includes database migrations. Follow these steps exactly to preserve your existing menu items, orders, and all data.**
+
+```bash
+cd /opt/siam-smile-pos
+
+# 1. Create a manual backup first (safety precaution)
+cp backend/data/data.json "backend/data/backups/pre-update-$(date +%Y%m%d-%H%M%S).json"
+
+# 2. Pull the latest code
+git pull
+
+# 3. Install dependencies (if package.json changed)
+npm install
+cd backend && npm install && cd ..
+cd frontend && npm install && cd ..
+
+# 4. Build the frontend
+npm run build
+
+# 5. Reload with PM2 (zero-downtime restart)
+pm2 reload siam-smile-pos
+
+# 6. Verify the application is running
+sleep 2
+curl http://localhost:3001/health
+
+# 7. Check logs for any migration messages
+pm2 logs siam-smile-pos --lines 20
+```
+
+**What This Update Includes:**
+1. **Menu Item Availability Toggle** - Admin can mark items as unavailable (real-time sync to cashier)
+2. **Expand Menu Item Modal** - Cashier can view item details with photo and description
+3. **Enhanced Receipt System** - Print receipts with randomized closing messages
+4. **Past Orders for Cashier** - View and reprint receipts for recent orders
+5. **Menu Backup/Restore** - Export and import menu data (JSON format)
+6. **Backward-Compatible Migrations** - Automatically adds new fields to existing data
+
+**Data Preservation Notes:**
+- ✅ All existing menu items are preserved
+- ✅ All existing categories are preserved  
+- ✅ All order history is preserved
+- ✅ New fields (`unavailable`, `description`) are auto-added with safe defaults
+- ✅ Backward compatibility maintained for all existing data
+
 ### Check Application Status
 ```bash
 pm2 status

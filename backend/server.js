@@ -80,6 +80,26 @@ function ensureStateStructure() {
   if (!state.metrics.hourlyDistribution) state.metrics.hourlyDistribution = {};
   if (!state.metrics.paymentMethods) state.metrics.paymentMethods = { cash: 0, card: 0, other: 0 };
 
+  // Migration: ensure menu items have unavailable field (default false) and description
+  if (state.menu && Array.isArray(state.menu)) {
+    let needsSave = false;
+    state.menu = state.menu.map(item => {
+      const updates = {};
+      if (item.unavailable === undefined) {
+        updates.unavailable = false;
+        needsSave = true;
+      }
+      if (item.description === undefined) {
+        updates.description = "";
+        needsSave = true;
+      }
+      return Object.keys(updates).length > 0 ? { ...item, ...updates } : item;
+    });
+    if (needsSave) {
+      saveState(state);
+    }
+  }
+
   saveState(state);
 }
 
@@ -439,6 +459,101 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("menu:setAvailability", (payload, cb) => {
+    try {
+      requireAdmin();
+      const { id, unavailable } = payload || {};
+      requireString(id, "id");
+      const item = state.menu.find(m => m.id === id);
+      assert(item, "Menu item not found");
+      item.unavailable = !!unavailable;
+      logEvent("menu:setAvailability", { by: socket.user?.role, username: socket.user?.username, id, unavailable: item.unavailable });
+      persistAndBroadcast(io);
+      cb?.({ ok: true, item });
+    } catch (e) {
+      cb?.({ ok: false, error: e.message });
+    }
+  });
+
+  // ===== Menu Backup/Restore =====
+  socket.on("menu:export", (payload, cb) => {
+    try {
+      requireAdmin();
+      const exportData = {
+        version: 2,
+        exportedAt: new Date().toISOString(),
+        exportedBy: socket.user?.username || socket.user?.role,
+        categories: state.categories || [],
+        menu: state.menu || []
+      };
+      cb?.({ ok: true, data: exportData });
+    } catch (e) {
+      cb?.({ ok: false, error: e.message });
+    }
+  });
+
+  socket.on("menu:import", (payload, cb) => {
+    try {
+      requireAdmin();
+      const { data, mode = "merge" } = payload || {};
+      assert(data && typeof data === "object", "Invalid data format");
+      assert(Array.isArray(data.menu), "Invalid menu data");
+      
+      if (mode === "replace") {
+        // Replace mode: clear existing and use backup
+        state.categories = data.categories || [];
+        state.menu = data.menu.map(item => ({
+          ...item,
+          unavailable: item.unavailable === undefined ? false : item.unavailable,
+          description: item.description === undefined ? "" : item.description
+        }));
+      } else {
+        // Merge mode (default): add/update items without deleting existing
+        const existingCatIds = new Set(state.categories.map(c => c.id));
+        const existingItemIds = new Set(state.menu.map(m => m.id));
+        
+        // Merge categories - add only new ones
+        for (const cat of (data.categories || [])) {
+          if (!existingCatIds.has(cat.id)) {
+            state.categories.push(cat);
+          }
+        }
+        
+        // Merge menu items
+        for (const item of data.menu) {
+          const normalizedItem = {
+            ...item,
+            unavailable: item.unavailable === undefined ? false : item.unavailable,
+            description: item.description === undefined ? "" : item.description
+          };
+          
+          if (existingItemIds.has(item.id)) {
+            // Update existing item
+            const idx = state.menu.findIndex(m => m.id === item.id);
+            if (idx >= 0) {
+              state.menu[idx] = { ...state.menu[idx], ...normalizedItem };
+            }
+          } else {
+            // Add new item
+            state.menu.push(normalizedItem);
+          }
+        }
+      }
+      
+      logEvent("menu:import", { 
+        by: socket.user?.role, 
+        username: socket.user?.username,
+        mode,
+        categoriesCount: data.categories?.length || 0,
+        itemsCount: data.menu?.length || 0
+      });
+      persistAndBroadcast(io);
+      cb?.({ ok: true, imported: { categories: data.categories?.length || 0, items: data.menu?.length || 0 } });
+    } catch (e) {
+      cb?.({ ok: false, error: e.message });
+    }
+  });
+
   // ===== Staff =====
   socket.on("staff:create", async (payload, cb) => {
     try {
@@ -515,6 +630,49 @@ io.on("connection", (socket) => {
       logEvent("staff:delete", { by: socket.user?.role, username: socket.user?.username, id });
       persistAndBroadcast(io);
       cb?.({ ok: true });
+    } catch (e) {
+      cb?.({ ok: false, error: e.message });
+    }
+  });
+
+  socket.on("staff:verifyPassword", async (payload, cb) => {
+    try {
+      // User can only verify their own password
+      const { password } = payload || {};
+      requireString(password, "password");
+      
+      const userId = socket.user?.sub;
+      const userRole = socket.user?.role;
+      
+      if (!userId) {
+        return cb?.({ ok: false, error: "Not authenticated" });
+      }
+      
+      let isValid = false;
+      
+      if (userRole === "admin") {
+        // For admin, verify against admin credentials
+        const { ADMIN_USERNAME, ADMIN_PASSWORD } = require("./constants");
+        const { username } = payload || {};
+        isValid = (username === ADMIN_USERNAME && password === ADMIN_PASSWORD);
+      } else {
+        // For staff, verify against stored hash
+        const staff = state.staff.find(s => s.id === userId);
+        if (!staff) {
+          return cb?.({ ok: false, error: "User not found" });
+        }
+        isValid = await staffPasswordVerify(password, staff.passwordHash);
+      }
+      
+      if (isValid) {
+        logEvent("auth:passwordVerified", { 
+          by: socket.user?.role, 
+          username: socket.user?.username,
+          userId 
+        });
+      }
+      
+      cb?.({ ok: isValid });
     } catch (e) {
       cb?.({ ok: false, error: e.message });
     }
@@ -962,14 +1120,35 @@ io.on("connection", (socket) => {
   socket.on("receipt:preview", (payload, cb) => {
     try {
       requireStaffOrAdmin();
-      const { orderId } = payload || {};
+      const { orderId, paymentMethod } = payload || {};
       requireString(orderId, "orderId");
       
       const order = state.orders.find(o => o.id === orderId);
       assert(order, "Order not found");
       
-      const preview = generateReceiptPreview(order, state.settings);
-      cb?.({ ok: true, preview });
+      // Find associated receipt for payment method
+      const receipt = state.receipts.find(r => r.orderId === orderId);
+      const pm = paymentMethod || receipt?.paymentMethod || null;
+      
+      const preview = generateReceiptPreview(order, state.settings, pm);
+      cb?.({ ok: true, preview, order, receipt });
+    } catch (e) {
+      cb?.({ ok: false, error: e.message });
+    }
+  });
+
+  socket.on("order:get", (payload, cb) => {
+    try {
+      requireStaffOrAdmin();
+      const { id } = payload || {};
+      requireString(id, "id");
+      
+      const order = state.orders.find(o => o.id === id);
+      assert(order, "Order not found");
+      
+      const receipt = state.receipts.find(r => r.orderId === id);
+      
+      cb?.({ ok: true, order, receipt });
     } catch (e) {
       cb?.({ ok: false, error: e.message });
     }
@@ -1352,7 +1531,26 @@ io.on("connection", (socket) => {
   });
 });
 
-function generateReceiptPreview(order, settings) {
+// Random closing messages for receipts
+const CLOSING_MESSAGES = [
+  "Thank you for visiting!",
+  "See you again soon!",
+  "We appreciate your business!",
+  "Have a wonderful day!",
+  "Thanks for choosing Siam Smile!",
+  "Come back soon!",
+  "Your satisfaction is our priority!",
+  "Thanks for dining with us!",
+  "We hope to serve you again!",
+  "Enjoy the rest of your day!"
+];
+
+function getRandomClosingMessage() {
+  const index = Math.floor(Math.random() * CLOSING_MESSAGES.length);
+  return CLOSING_MESSAGES[index];
+}
+
+function generateReceiptPreview(order, settings, paymentMethod = null) {
   const lines = [];
   const currency = settings?.currency || "AED";
   
@@ -1363,6 +1561,12 @@ function generateReceiptPreview(order, settings) {
   lines.push(`Order #${order.id.slice(0, 8).toUpperCase()}`);
   lines.push(`Date: ${new Date(order.createdAt).toLocaleString()}`);
   lines.push(`Staff: ${order.createdByUsername || "Staff"}`);
+  if (order.customerName) {
+    lines.push(`Customer: ${order.customerName}`);
+  }
+  if (order.tableNumber) {
+    lines.push(`Table: ${order.tableNumber}`);
+  }
   lines.push("-".repeat(40));
   lines.push("");
   
@@ -1378,6 +1582,9 @@ function generateReceiptPreview(order, settings) {
   
   if (order.discount) {
     lines.push(`Discount: -${order.discount.toFixed(2).padStart(7)} ${currency}`);
+    if (order.promo?.code) {
+      lines.push(`  (${order.promo.code})`);
+    }
   }
   
   const tax = (order.subtotal * (settings?.taxPercent || 0)) / 100;
@@ -1393,8 +1600,14 @@ function generateReceiptPreview(order, settings) {
   lines.push("=".repeat(40));
   lines.push(`TOTAL: ${order.total?.toFixed(2).padStart(12)} ${currency}`);
   lines.push("=".repeat(40));
+  
+  if (paymentMethod) {
+    lines.push("");
+    lines.push(`Payment: ${paymentMethod.toUpperCase()}`);
+  }
+  
   lines.push("");
-  lines.push("Thank you for your business!");
+  lines.push(getRandomClosingMessage());
   lines.push("");
   
   return lines.join("\n");

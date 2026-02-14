@@ -57,6 +57,14 @@ function loadState() {
   if (s.staff && Array.isArray(s.staff)) {
     s.staff = s.staff.map(st => ({ ...st, role: st.role || "both" }));
   }
+  // Migration: ensure menu items have unavailable field (default false)
+  if (s.menu && Array.isArray(s.menu)) {
+    s.menu = s.menu.map(item => ({ 
+      ...item, 
+      unavailable: item.unavailable === undefined ? false : item.unavailable,
+      description: item.description === undefined ? "" : item.description
+    }));
+  }
   return s;
 }
 
